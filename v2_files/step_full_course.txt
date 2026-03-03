@@ -1,0 +1,11 @@
+//goal
+provide a full course content by executing all the steps sequentially until the last step.
+
+
+//steps
+1. generate an overview of the content with 'step_mindmap.txt'
+2. generate an html page of the content with 'step_html_page.txt'
+3. generate a set of closed questions with 'step_closed_questions.txt'
+4. generate a set of open questions with 'step_open_questions.txt'
+5. generate a set of drag the words with 'step_dragthewords.txt'
+6. generate a set of fill the blanks with 'step_filltheblanks.txt'
