@@ -282,12 +282,20 @@ def call_model(
         "Follow the provided instruction files exactly. "
         "If instructions conflict, prioritize selected step files, then v2 README, then prompt_v2. "
         "Respect required output format and separators. "
-        "Output in the same language as the user input unless a step explicitly says otherwise."
+        "Output in the same language as the user input unless a step explicitly says otherwise. "
+        "This is a single-turn execution inside an app UI, not a conversational workflow. "
+        "Do not ask follow-up questions. "
+        "The user has already provided input and selected the step."
     )
 
     user_prompt = (
         f"Selected step: {step_key}\n"
         f"Language hint: {language_hint}\n\n"
+        "EXECUTION MODE\n"
+        "- Execute immediately.\n"
+        "- Never ask the user to provide text/topic or to choose a step.\n"
+        "- Treat USER CONTENT as valid input even if short.\n"
+        "- If USER CONTENT is only a topic, generate based on that topic.\n\n"
         "INSTRUCTIONS START\n"
         f"{instruction_payload}\n"
         "INSTRUCTIONS END\n\n"
@@ -327,6 +335,21 @@ def call_model(
         max_completion_tokens=8000,
     )
     return (response.choices[0].message.content or "").strip()
+
+
+def is_follow_up_request(text: str) -> bool:
+    lowered = text.lower()
+    patterns = [
+        "please provide",
+        "provide a text",
+        "provide text",
+        "specific topic",
+        "which step",
+        "select a step",
+        "paste a text",
+        "enter a text",
+    ]
+    return any(pattern in lowered for pattern in patterns)
 
 
 def normalize_output_for_codebox(output: str) -> str:
@@ -407,6 +430,21 @@ def main() -> None:
                     step_key=selected_step,
                     image=uploaded_image,
                 )
+                if is_follow_up_request(raw_output):
+                    retry_input = (
+                        user_input.strip()
+                        + "\n\nIMPORTANT\n"
+                        "Generate now from the provided topic/text. "
+                        "Do not ask for additional input."
+                    )
+                    raw_output = call_model(
+                        client=client,
+                        instruction_payload=instruction_payload,
+                        user_input=retry_input,
+                        language_hint=LANG_HINT.get(detected_lang, "English"),
+                        step_key=selected_step,
+                        image=uploaded_image,
+                    )
             except Exception as exc:
                 st.error(f"Generation failed: {exc}")
                 logging.exception("Generation failure")
