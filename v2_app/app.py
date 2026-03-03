@@ -29,7 +29,8 @@ for env_var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_V2_DIR = REPO_ROOT / "v2_files"
 RAW_BASE_URL = "https://raw.githubusercontent.com/aburossi/prompts/main/olatimport"
-MODEL_NAME = "gpt-4o"
+MODEL_CANDIDATES = ["gpt-5.2", "gpt-5", "gpt-4o"]
+MAX_IMAGE_ATTACHMENTS = 12
 
 STEP_FILES: Dict[str, List[str]] = {
     "A": ["step_closed_questions.txt"],
@@ -156,34 +157,56 @@ def extract_text_from_pdf_bytes(file_bytes: bytes) -> str:
     return "\n".join(chunks).strip()
 
 
-def process_uploaded_file(uploaded_file) -> Tuple[str, Optional[Image.Image], List[str]]:
+def process_uploaded_file(uploaded_file) -> Tuple[str, List[Image.Image], List[str]]:
     warnings: List[str] = []
     file_bytes = uploaded_file.getvalue()
+    file_name = getattr(uploaded_file, "name", "uploaded_file")
 
     if uploaded_file.type == "application/pdf":
         text = extract_text_from_pdf_bytes(file_bytes)
         if text:
-            return text, None, warnings
+            labeled_text = f"[Source: {file_name}]\n{text}"
+            return labeled_text, [], warnings
         try:
-            images = convert_from_bytes(file_bytes, first_page=1, last_page=1)
+            images = convert_from_bytes(file_bytes)
             if images:
-                warnings.append("No OCR text found in PDF. Using first page as image input.")
-                return "", images[0], warnings
+                warnings.append(
+                    f"No OCR text found in {file_name}. Using all PDF pages as image input."
+                )
+                return "", images, warnings
         except Exception as exc:
-            warnings.append(f"PDF to image conversion failed: {exc}")
-        return "", None, warnings
+            warnings.append(f"PDF to image conversion failed for {file_name}: {exc}")
+        return "", [], warnings
 
     if uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         doc = docx.Document(io.BytesIO(file_bytes))
         text = "\n".join(paragraph.text for paragraph in doc.paragraphs).strip()
-        return text, None, warnings
+        labeled_text = f"[Source: {file_name}]\n{text}" if text else ""
+        return labeled_text, [], warnings
 
     if uploaded_file.type.startswith("image/"):
-        image = Image.open(io.BytesIO(file_bytes))
-        return "", image, warnings
+        image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+        return "", [image], warnings
 
     warnings.append("Unsupported file type. Upload PDF, DOCX, JPG, JPEG, or PNG.")
-    return "", None, warnings
+    return "", [], warnings
+
+
+def process_uploaded_files(uploaded_files) -> Tuple[str, List[Image.Image], List[str]]:
+    text_chunks: List[str] = []
+    all_images: List[Image.Image] = []
+    all_warnings: List[str] = []
+
+    for uploaded_file in uploaded_files:
+        text, images, warnings = process_uploaded_file(uploaded_file)
+        if text:
+            text_chunks.append(text)
+        if images:
+            all_images.extend(images)
+        if warnings:
+            all_warnings.extend(warnings)
+
+    return "\n\n".join(text_chunks).strip(), all_images, all_warnings
 
 
 def fetch_remote_text(path_name: str) -> Optional[str]:
@@ -275,8 +298,16 @@ def call_model(
     user_input: str,
     language_hint: str,
     step_key: str,
-    image: Optional[Image.Image],
-) -> str:
+    images: List[Image.Image],
+) -> Tuple[str, str]:
+    images_for_model = images[:MAX_IMAGE_ATTACHMENTS]
+    image_count_note = ""
+    if len(images) > MAX_IMAGE_ATTACHMENTS:
+        image_count_note = (
+            f"\n- {len(images)} images were uploaded; only the first {MAX_IMAGE_ATTACHMENTS} "
+            "are attached due to request-size limits."
+        )
+
     system_prompt = (
         "You are an educational content generator for OpenOLAT imports. "
         "Follow the provided instruction files exactly. "
@@ -295,7 +326,9 @@ def call_model(
         "- Execute immediately.\n"
         "- Never ask the user to provide text/topic or to choose a step.\n"
         "- Treat USER CONTENT as valid input even if short.\n"
-        "- If USER CONTENT is only a topic, generate based on that topic.\n\n"
+        "- If USER CONTENT is only a topic, generate based on that topic.\n"
+        "- If images are attached, use all attached images together in one output.\n"
+        f"{image_count_note}\n\n"
         "INSTRUCTIONS START\n"
         f"{instruction_payload}\n"
         "INSTRUCTIONS END\n\n"
@@ -304,22 +337,25 @@ def call_model(
         "USER CONTENT END"
     )
 
-    if image is not None:
-        image_data = encode_image_for_openai(image)
+    if images_for_model:
+        content_items = [{"type": "text", "text": user_prompt}]
+        for image in images_for_model:
+            image_data = encode_image_for_openai(image)
+            content_items.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{image_data}",
+                        "detail": "low",
+                    },
+                }
+            )
+
         messages = [
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": user_prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_data}",
-                            "detail": "low",
-                        },
-                    },
-                ],
+                "content": content_items,
             },
         ]
     else:
@@ -328,13 +364,21 @@ def call_model(
             {"role": "user", "content": user_prompt},
         ]
 
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        temperature=0.4,
-        max_completion_tokens=8000,
-    )
-    return (response.choices[0].message.content or "").strip()
+    last_error: Optional[Exception] = None
+    for model_name in MODEL_CANDIDATES:
+        try:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=0.4,
+                max_completion_tokens=8000,
+            )
+            return (response.choices[0].message.content or "").strip(), model_name
+        except Exception as exc:
+            last_error = exc
+            logging.warning("Model attempt failed for %s: %s", model_name, exc)
+
+    raise RuntimeError(f"All model attempts failed: {last_error}")
 
 
 def is_follow_up_request(text: str) -> bool:
@@ -371,26 +415,29 @@ def main() -> None:
         "Upload text material or provide a topic, then choose workflow A-H."
     )
 
-    uploaded_file = st.file_uploader(
-        "Upload a PDF, DOCX, or image (optional)",
+    uploaded_files = st.file_uploader(
+        "Upload one or more PDFs, DOCX files, or images (optional)",
         type=["pdf", "docx", "jpg", "jpeg", "png"],
+        accept_multiple_files=True,
     )
 
     extracted_text = ""
-    uploaded_image: Optional[Image.Image] = None
+    uploaded_images: List[Image.Image] = []
 
-    if uploaded_file is not None:
-        extracted_text, uploaded_image, warnings = process_uploaded_file(uploaded_file)
+    if uploaded_files:
+        extracted_text, uploaded_images, warnings = process_uploaded_files(uploaded_files)
         for warning in warnings:
             st.warning(warning)
         if extracted_text:
-            st.success("Text extracted from uploaded file.")
-        if uploaded_image is not None:
-            st.image(uploaded_image, caption="Uploaded image", use_container_width=True)
+            st.success("Text extracted from uploaded files.")
+        if uploaded_images:
+            preview_images = uploaded_images[:4]
+            st.image(preview_images, caption=[f"Image {i+1}" for i in range(len(preview_images))])
+            st.info(f"Loaded {len(uploaded_images)} image(s).")
 
     default_text = extracted_text if extracted_text else ""
     user_input = st.text_area(
-        "Paste your source text or enter a topic",
+        "Paste your source text/topic (single prompt used for all uploaded images)",
         value=default_text,
         height=240,
     )
@@ -407,8 +454,8 @@ def main() -> None:
     )
 
     if st.button("Generate", type="primary"):
-        if not user_input.strip() and uploaded_image is None:
-            st.warning("Please provide text/topic or upload an image.")
+        if not user_input.strip() and not uploaded_images:
+            st.warning("Please provide text/topic or upload at least one file/image.")
             st.stop()
 
         client = get_openai_client()
@@ -422,13 +469,13 @@ def main() -> None:
 
         with st.spinner("Generating content..."):
             try:
-                raw_output = call_model(
+                raw_output, used_model = call_model(
                     client=client,
                     instruction_payload=instruction_payload,
                     user_input=user_input,
                     language_hint=LANG_HINT.get(detected_lang, "English"),
                     step_key=selected_step,
-                    image=uploaded_image,
+                    images=uploaded_images,
                 )
                 if is_follow_up_request(raw_output):
                     retry_input = (
@@ -437,13 +484,13 @@ def main() -> None:
                         "Generate now from the provided topic/text. "
                         "Do not ask for additional input."
                     )
-                    raw_output = call_model(
+                    raw_output, used_model = call_model(
                         client=client,
                         instruction_payload=instruction_payload,
                         user_input=retry_input,
                         language_hint=LANG_HINT.get(detected_lang, "English"),
                         step_key=selected_step,
-                        image=uploaded_image,
+                        images=uploaded_images,
                     )
             except Exception as exc:
                 st.error(f"Generation failed: {exc}")
@@ -452,6 +499,7 @@ def main() -> None:
 
         cleaned_output = normalize_output_for_codebox(raw_output)
         st.subheader("Generated Output")
+        st.caption(f"Model used: `{used_model}`")
         st.code(cleaned_output if cleaned_output else raw_output, language="text")
 
         st.download_button(
