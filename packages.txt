@@ -1,0 +1,3 @@
+poppler-utils
+ghostscript
+zlib1g-dev
