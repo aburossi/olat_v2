@@ -33,7 +33,7 @@ for env_var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_V2_DIR = REPO_ROOT / "v2_files"
 RAW_BASE_URL = "https://raw.githubusercontent.com/aburossi/prompts/main/olatimport"
-MODEL_CANDIDATES = ["gpt-4o", "gpt-5-mini"]
+MODEL_CANDIDATES = ["gpt-5.2", "gpt-5-mini"]
 MAX_IMAGE_ATTACHMENTS = 12
 
 ACCEPTED_FILE_TYPES = ["pdf", "docx", "jpg", "jpeg", "png", "txt", "md", "json", "csv", "html", "htm", "xml"]
@@ -316,12 +316,13 @@ def extract_text_from_pdf_bytes(file_bytes: bytes) -> str:
     return "\n".join(chunks).strip()
 
 
-def process_uploaded_file(uploaded_file) -> Tuple[str, List[Image.Image], List[str], str]:
+@st.cache_data(show_spinner=False)
+def process_uploaded_file(file_name: str, file_bytes: bytes, mime: str) -> Tuple[str, List[Image.Image], List[str], str]:
     """Returns (text, images, warnings, file_type_key)."""
     warnings: List[str] = []
-    file_bytes = uploaded_file.getvalue()
-    file_name = getattr(uploaded_file, "name", "uploaded_file")
-    mime = uploaded_file.type or ""
+    # file_bytes = uploaded_file.getvalue()
+    # file_name = getattr(uploaded_file, "name", "uploaded_file")
+    # mime = uploaded_file.type or ""
 
     if mime == "application/pdf":
         text = extract_text_from_pdf_bytes(file_bytes)
@@ -367,7 +368,8 @@ def process_uploaded_files(uploaded_files) -> Tuple[str, List[Image.Image], List
     """Returns (text, images, warnings, file_meta_list)."""
     text_chunks, images, warnings, file_meta = [], [], [], []
     for f in uploaded_files:
-        t, i, w, type_key = process_uploaded_file(f)
+        # Pass primitive types to allow caching
+        t, i, w, type_key = process_uploaded_file(f.name, f.getvalue(), f.type or "")
         if t:
             text_chunks.append(t)
         if i:
@@ -531,6 +533,8 @@ def main():
         st.session_state["lang_override"] = None
     if "last_input_hash" not in st.session_state:
         st.session_state["last_input_hash"] = None
+    if "history" not in st.session_state:
+        st.session_state["history"] = []
 
     # ── Sidebar: API key check ─────────────────────────────────────────────────
     client = get_openai_client()
@@ -618,6 +622,8 @@ def main():
             )
             if st.button(f"Select {short_label}", key=f"step_btn_{key}", use_container_width=True):
                 st.session_state["selected_step"] = key
+                st.session_state["step_outputs"] = {}
+                st.session_state["step_errors"] = {}
                 st.rerun()
 
     selected_step = st.session_state["selected_step"]
@@ -659,6 +665,7 @@ def main():
 
         steps = STEP_FILES[selected_step]
         st.session_state["step_outputs"] = {}
+        st.session_state["step_errors"] = {}
 
         with st.status("Executing Workflow…", expanded=True) as status:
             progress = st.progress(0.0)
@@ -677,59 +684,67 @@ def main():
                     st.session_state["step_errors"][step_file] = err
                 progress.progress((idx + 1) / total)
             status.update(label="✅ Generation complete!", state="complete")
+            
+            # Save to history
+            if st.session_state["step_outputs"]:
+                st.session_state["history"].append({
+                    "timestamp": time.strftime("%H:%M:%S"),
+                    "step": selected_step,
+                    "label": labels.get(selected_step, selected_step),
+                    "outputs": st.session_state["step_outputs"].copy()
+                })
 
-    # ── Output section ────────────────────────────────────────────────────────
-    if st.session_state["step_outputs"]:
+    # ── History Section ───────────────────────────────────────────────────────
+    if st.session_state["history"]:
         st.divider()
-        st.subheader("Generated OLAT Content")
-
-        combined_text = "\n\n".join(st.session_state["step_outputs"].values())
-
-        # Copy + Download row
-        col_copy, col_dl = st.columns([1, 1])
-        with col_copy:
-            clipboard_button(
-                combined_text,
-                "📋 Copy All to Clipboard",
-                "✅ Copied!",
-                key="main_copy",
-            )
-        with col_dl:
-            filename = make_download_filename(selected_step, effective_lang)
+        st.subheader("📚 Generation History")
+        
+        # Combined download for all history
+        all_text_list = []
+        for item in st.session_state["history"]:
+            item_text = "\n\n".join(item["outputs"].values())
+            all_text_list.append(f"--- {item['label']} ({item['timestamp']}) ---\n{item_text}")
+        
+        full_history_text = "\n\n\n".join(all_text_list)
+        
+        col_copy_all, col_dl_all, col_clear = st.columns([1, 1, 1])
+        with col_copy_all:
+            clipboard_button(full_history_text, "📋 Copy All History", "✅ Copied All!", key="history_copy_all")
+        with col_dl_all:
             st.download_button(
-                "⬇️ Download .txt",
-                combined_text,
-                file_name=filename,
+                "⬇️ Download All History",
+                full_history_text,
+                file_name=f"olat_history_{date.today().isoformat()}.txt",
                 mime="text/plain",
-                use_container_width=True,
+                use_container_width=True
             )
+        with col_clear:
+            if st.button("🗑️ Clear History", use_container_width=True):
+                st.session_state["history"] = []
+                st.session_state["step_outputs"] = {}
+                st.rerun()
 
-        st.caption(f"Download filename: `{filename}`")
-
-        # Per-step output blocks
-        for step_file, output in st.session_state["step_outputs"].items():
-            with st.expander(f"📄 {step_file}", expanded=True):
-                st.code(output, language="text")
-
-                regen_col, _ = st.columns([1, 3])
-                with regen_col:
-                    if st.button(f"🔄 Regenerate", key=f"regen_{step_file}"):
-                        if not client:
-                            st.error("API key not configured.")
-                        else:
-                            with st.spinner(f"Regenerating {step_file}…"):
-                                new_output, regen_err = run_step(
-                                    client, step_file, user_input, effective_lang, num_questions, images
-                                )
-                            if new_output:
-                                st.session_state["step_outputs"][step_file] = new_output
-                                st.rerun()
-                            elif regen_err:
-                                st.error(regen_err)
-
-        # Full combined view
-        with st.expander("📋 Combined output (all steps)", expanded=False):
-            st.code(combined_text, language="text")
+        for idx, item in enumerate(reversed(st.session_state["history"])):
+            with st.expander(f"🕒 {item['label']} (at {item['timestamp']})", expanded=(idx == 0)):
+                combined_item_text = "\n\n".join(item["outputs"].values())
+                
+                # Per-item actions
+                h_col1, h_col2 = st.columns([1, 1])
+                with h_col1:
+                    clipboard_button(combined_item_text, "📋 Copy This Set", "✅ Copied!", key=f"h_copy_{idx}")
+                with h_col2:
+                    st.download_button(
+                        "⬇️ Download This Set",
+                        combined_item_text,
+                        file_name=make_download_filename(item["step"], effective_lang),
+                        mime="text/plain",
+                        key=f"h_dl_{idx}",
+                        use_container_width=True
+                    )
+                
+                for step_file, output in item["outputs"].items():
+                    st.markdown(f"**{step_file}**")
+                    st.code(output, language="text")
 
 
 if __name__ == "__main__":
