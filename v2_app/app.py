@@ -1,9 +1,11 @@
 ﻿import base64
 import io
+import json
 import logging
 import os
+import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import docx
 import httpx
@@ -29,7 +31,7 @@ for env_var in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"]:
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LOCAL_V2_DIR = REPO_ROOT / "v2_files"
 RAW_BASE_URL = "https://raw.githubusercontent.com/aburossi/prompts/main/olatimport"
-MODEL_CANDIDATES = ["gpt-5.2", "gpt-5", "gpt-4o"]
+MODEL_CANDIDATES = ["gpt-4o", "gpt-4-turbo"]
 MAX_IMAGE_ATTACHMENTS = 12
 
 STEP_FILES: Dict[str, List[str]] = {
@@ -38,12 +40,7 @@ STEP_FILES: Dict[str, List[str]] = {
     "C": ["step_closed_questions.txt", "step_open_questions.txt"],
     "D": ["step_dragthewords.txt"],
     "E": ["step_filltheblanks.txt"],
-    "F": ["step_html_page.txt"],
-    "G": ["step_mindmap.txt"],
     "H": [
-        "step_full_course.txt",
-        "step_mindmap.txt",
-        "step_html_page.txt",
         "step_closed_questions.txt",
         "step_open_questions.txt",
         "step_dragthewords.txt",
@@ -56,51 +53,17 @@ STEP_LABELS = {
         "A": "A) Closed questions",
         "B": "B) Open questions",
         "C": "C) Mixed closed and open questions",
-        "D": "D) Drag the words",
+        "D": "D) Inline choice questions",
         "E": "E) Fill in the blanks",
-        "F": "F) Educational HTML page",
-        "G": "G) Mindmap in HTML",
         "H": "H) Full course workflow",
     },
     "de": {
         "A": "A) Geschlossene Fragen",
         "B": "B) Offene Fragen",
         "C": "C) Mischung aus geschlossenen und offenen Fragen",
-        "D": "D) Drag the words",
+        "D": "D) Inline-Choice Fragen",
         "E": "E) Lueckentexte",
-        "F": "F) HTML-Lernseite",
-        "G": "G) Mindmap in HTML",
         "H": "H) Vollstaendiger Kursablauf",
-    },
-    "fr": {
-        "A": "A) Questions fermees",
-        "B": "B) Questions ouvertes",
-        "C": "C) Melange questions fermees et ouvertes",
-        "D": "D) Drag the words",
-        "E": "E) Texte a trous",
-        "F": "F) Page HTML educative",
-        "G": "G) Mindmap en HTML",
-        "H": "H) Workflow cours complet",
-    },
-    "it": {
-        "A": "A) Domande chiuse",
-        "B": "B) Domande aperte",
-        "C": "C) Mix domande chiuse e aperte",
-        "D": "D) Drag the words",
-        "E": "E) Fill in the blanks",
-        "F": "F) Pagina HTML educativa",
-        "G": "G) Mindmap in HTML",
-        "H": "H) Workflow corso completo",
-    },
-    "es": {
-        "A": "A) Preguntas cerradas",
-        "B": "B) Preguntas abiertas",
-        "C": "C) Mezcla de preguntas cerradas y abiertas",
-        "D": "D) Drag the words",
-        "E": "E) Rellenar huecos",
-        "F": "F) Pagina HTML educativa",
-        "G": "G) Mindmap en HTML",
-        "H": "H) Flujo curso completo",
     },
 }
 
@@ -111,6 +74,95 @@ LANG_HINT = {
     "it": "Italian",
     "es": "Spanish",
 }
+
+
+def parse_json_to_olat(json_str: str) -> str:
+    """Converts the generated JSON format to the OLAT import text format."""
+    try:
+        # Extract JSON from markdown code block if present
+        if "```json" in json_str:
+            json_str = json_str.split("```json")[1].split("```")[0].strip()
+        elif "```" in json_str:
+            json_str = json_str.split("```")[1].split("```")[0].strip()
+        
+        data = json.loads(json_str)
+        questions = data.get("questions", [])
+        output_blocks = []
+
+        for q in questions:
+            q_type = q.get("type", "SC")
+            title = q.get("title", "Question")
+            text = q.get("question") or q.get("text") or q.get("instructions")
+            points = q.get("points", 1)
+
+            if q_type == "SC":
+                block = [f"Typ\tSC", f"Title\t{title}", f"Question\t{text}", f"Points\t{points}"]
+                for ans in q.get("answers", []):
+                    block.append(f"{ans.get('points')}\t{ans.get('text')}")
+                output_blocks.append("\n".join(block))
+
+            elif q_type == "MC":
+                max_ans = q.get("max_answers", 4)
+                min_ans = q.get("min_answers", 0)
+                block = [f"Typ\tMC", f"Title\t{title}", f"Question\t{text}", f"Max answers\t{max_ans}", f"Min answers\t{min_ans}", f"Points\t{points}"]
+                for ans in q.get("answers", []):
+                    block.append(f"{ans.get('points')}\t{ans.get('text')}")
+                output_blocks.append("\n".join(block))
+
+            elif q_type == "KPRIM":
+                block = [f"Typ\tKPRIM", f"Title\t{title}", f"Question\t{text}", f"Points\t{points}"]
+                for ans in q.get("answers", []):
+                    prefix = "+" if ans.get("correct") else "-"
+                    block.append(f"{prefix}\t{ans.get('text')}")
+                output_blocks.append("\n".join(block))
+
+            elif q_type == "Truefalse":
+                block = [f"Typ\tTruefalse", f"Title\t{title}", f"Question\t{text}", f"Points\t{points}", "\tUnanswered\tRight\tWrong"]
+                for stmt in q.get("statements", []):
+                    r, w = (1, -0.5) if stmt.get("correct") else (-0.5, 1)
+                    block.append(f"{stmt.get('text')}\t0\t{r}\t{w}")
+                output_blocks.append("\n".join(block))
+
+            elif q_type == "FIB":
+                ans = q.get("answer")
+                length = q.get("length", 150)
+                block = [f"Typ\tFIB", f"Title\t{title}", f"Points\t{points}", f"Text\t{text}", f"{points}\t{ans}\t{length}"]
+                output_blocks.append("\n".join(block))
+
+            elif q_type == "ESSAY":
+                min_c = q.get("min_chars", 200)
+                max_c = q.get("max_chars", 2000)
+                block = [f"Typ\tESSAY", f"Title\t{title}", f"Question\t{text}", f"Points\t{points}", f"Min\t{min_c}", f"Max\t{max_c}"]
+                output_blocks.append("\n".join(block))
+
+            elif q_type == "Inlinechoice":
+                segments = q.get("text_segments", [])
+                instructions = q.get("instructions", "Vervollständigen Sie den Text.")
+                all_correct_options = [s.get("blank") for s in segments if "blank" in s]
+                
+                output = [
+                    "Typ\tInlinechoice",
+                    f"Title\t{title}",
+                    f"Question\t{instructions}",
+                    f"Points\t{len(all_correct_options)}",
+                    "Text\t✏"
+                ]
+                
+                for seg in segments:
+                    if "text" in seg:
+                        output.append(f"Text\t{seg['text'].strip()}")
+                    if "blank" in seg:
+                        correct = seg["blank"]
+                        options = seg.get("all_options", [correct])
+                        options_str = ";".join(options)
+                        output.append(f"1\t{options_str}\t{correct}")
+                
+                output_blocks.append("\n".join(output))
+
+        return "\n\n".join(output_blocks)
+    except Exception as e:
+        logging.error(f"JSON parsing failed: {e}")
+        return json_str # Fallback to raw output
 
 
 @st.cache_data(show_spinner=False)
@@ -124,12 +176,6 @@ def detect_language(text: str) -> str:
     lowered = text.lower()
     if not lowered.strip():
         return "en"
-
-    # Lightweight heuristic for UI labels and language hinting only.
-    if any(char in lowered for char in ["ae", "oe", "ue", "ss"]):
-        if any(token in lowered for token in ["und", "oder", "nicht", "frage", "thema"]):
-            return "de"
-
     scores = {
         "de": sum(token in lowered for token in [" und ", " der ", " die ", " das ", "nicht", "frage"]),
         "fr": sum(token in lowered for token in [" le ", " la ", " les ", "des", "et", "question"]),
@@ -137,7 +183,6 @@ def detect_language(text: str) -> str:
         "es": sum(token in lowered for token in [" el ", " la ", " los ", "las", "que", "pregunta"]),
         "en": sum(token in lowered for token in [" the ", " and ", "what", "question", "text"]),
     }
-
     return max(scores, key=scores.get) if max(scores.values()) > 0 else "en"
 
 
@@ -170,17 +215,15 @@ def process_uploaded_file(uploaded_file) -> Tuple[str, List[Image.Image], List[s
         try:
             images = convert_from_bytes(file_bytes)
             if images:
-                warnings.append(
-                    f"No OCR text found in {file_name}. Using all PDF pages as image input."
-                )
+                warnings.append(f"No OCR text found in {file_name}. Using PDF pages as images.")
                 return "", images, warnings
         except Exception as exc:
-            warnings.append(f"PDF to image conversion failed for {file_name}: {exc}")
+            warnings.append(f"PDF conversion failed: {exc}")
         return "", [], warnings
 
     if uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         doc = docx.Document(io.BytesIO(file_bytes))
-        text = "\n".join(paragraph.text for paragraph in doc.paragraphs).strip()
+        text = "\n".join(p.text for p in doc.paragraphs).strip()
         labeled_text = f"[Source: {file_name}]\n{text}" if text else ""
         return labeled_text, [], warnings
 
@@ -188,108 +231,47 @@ def process_uploaded_file(uploaded_file) -> Tuple[str, List[Image.Image], List[s
         image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
         return "", [image], warnings
 
-    warnings.append("Unsupported file type. Upload PDF, DOCX, JPG, JPEG, or PNG.")
-    return "", [], warnings
+    return "", [], ["Unsupported file type."]
 
 
 def process_uploaded_files(uploaded_files) -> Tuple[str, List[Image.Image], List[str]]:
-    text_chunks: List[str] = []
-    all_images: List[Image.Image] = []
-    all_warnings: List[str] = []
-
-    for uploaded_file in uploaded_files:
-        text, images, warnings = process_uploaded_file(uploaded_file)
-        if text:
-            text_chunks.append(text)
-        if images:
-            all_images.extend(images)
-        if warnings:
-            all_warnings.extend(warnings)
-
-    return "\n\n".join(text_chunks).strip(), all_images, all_warnings
+    text_chunks, images, warnings = [], [], []
+    for f in uploaded_files:
+        t, i, w = process_uploaded_file(f)
+        if t: text_chunks.append(t)
+        if i: images.extend(i)
+        if w: warnings.extend(w)
+    return "\n\n".join(text_chunks).strip(), images, warnings
 
 
 def fetch_remote_text(path_name: str) -> Optional[str]:
-    candidates = [path_name]
-    if path_name == "step_dragthewords.txt":
-        candidates.append("step_dragthewords.txt.txt")
-
-    with httpx.Client(timeout=20.0) as client:
-        for candidate in candidates:
-            url = f"{RAW_BASE_URL}/{candidate}"
-            try:
-                response = client.get(url)
-                if response.status_code == 200 and response.text.strip():
-                    return response.text.strip()
-            except Exception:
-                continue
+    url = f"{RAW_BASE_URL}/{path_name}"
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            response = client.get(url)
+            if response.status_code == 200:
+                return response.text.strip()
+    except Exception:
+        pass
     return None
 
 
 def load_instruction_file(filename: str) -> Tuple[Optional[str], str]:
-    local_candidates = [
-        LOCAL_V2_DIR / filename,
-        REPO_ROOT / filename,
-    ]
-
-    for local_path in local_candidates:
-        content = read_text_file(local_path)
-        if content:
-            return content, f"local:{local_path}"
-
-    remote_content = fetch_remote_text(filename)
-    if remote_content:
-        return remote_content, f"remote:{RAW_BASE_URL}/{filename}"
-
+    local_path = LOCAL_V2_DIR / filename
+    content = read_text_file(local_path)
+    if content: return content, f"local:{filename}"
+    remote = fetch_remote_text(filename)
+    if remote: return remote, f"remote:{filename}"
     return None, "missing"
 
 
 def get_openai_client() -> Optional[OpenAI]:
     try:
         api_key = st.secrets["openai"]["api_key"]
-        http_client = httpx.Client(timeout=60.0)
-        return OpenAI(api_key=api_key, http_client=http_client)
-    except Exception as exc:
-        st.error(f"OpenAI client initialization failed: {exc}")
+        return OpenAI(api_key=api_key)
+    except Exception as e:
+        st.error(f"API Key error: {e}")
         return None
-
-
-def build_instruction_payload(step_key: str) -> Tuple[str, List[str], List[str]]:
-    sources: List[str] = []
-    missing: List[str] = []
-
-    prompt_v2 = read_text_file(REPO_ROOT / "prompt_v2.md")
-    readme_v2 = read_text_file(LOCAL_V2_DIR / "README.txt")
-
-    if prompt_v2:
-        sources.append("local:prompt_v2.md")
-    else:
-        missing.append("prompt_v2.md")
-
-    if readme_v2:
-        sources.append("local:v2_files/README.txt")
-    else:
-        missing.append("v2_files/README.txt")
-
-    selected_files = STEP_FILES[step_key]
-    step_blocks: List[str] = []
-
-    for filename in selected_files:
-        content, source = load_instruction_file(filename)
-        if content:
-            sources.append(source)
-            step_blocks.append(f"FILE {filename}\n{content}")
-        else:
-            missing.append(filename)
-
-    parts = []
-    if prompt_v2:
-        parts.append(f"GLOBAL PROMPT V2\n{prompt_v2}")
-    if readme_v2:
-        parts.append(f"GLOBAL README V2\n{readme_v2}")
-    parts.extend(step_blocks)
-
-    return "\n\n".join(parts), sources, missing
 
 
 def call_model(
@@ -297,225 +279,75 @@ def call_model(
     instruction_payload: str,
     user_input: str,
     language_hint: str,
-    step_key: str,
+    step_filename: str,
     images: List[Image.Image],
-) -> Tuple[str, str]:
-    images_for_model = images[:MAX_IMAGE_ATTACHMENTS]
-    image_count_note = ""
-    if len(images) > MAX_IMAGE_ATTACHMENTS:
-        image_count_note = (
-            f"\n- {len(images)} images were uploaded; only the first {MAX_IMAGE_ATTACHMENTS} "
-            "are attached due to request-size limits."
-        )
-
+) -> str:
     system_prompt = (
         "You are an educational content generator for OpenOLAT imports. "
-        "Follow the provided instruction files exactly. "
-        "If instructions conflict, prioritize selected step files, then v2 README, then prompt_v2. "
-        "Respect required output format and separators. "
-        "Output in the same language as the user input unless a step explicitly says otherwise. "
-        "This is a single-turn execution inside an app UI, not a conversational workflow. "
-        "Do not ask follow-up questions. "
-        "The user has already provided input and selected the step."
+        "Strictly follow the provided JSON instructions. "
+        "Output ONLY the JSON in a code box. "
+        "Do not ask questions or provide explanations."
     )
+    
+    content_items = [{"type": "text", "text": f"Instruction File: {step_filename}\nLanguage: {language_hint}\n\nContent:\n{user_input}\n\n{instruction_payload}"}]
+    for img in images[:MAX_IMAGE_ATTACHMENTS]:
+        content_items.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encode_image_for_openai(img)}", "detail": "low"}})
 
-    user_prompt = (
-        f"Selected step: {step_key}\n"
-        f"Language hint: {language_hint}\n\n"
-        "EXECUTION MODE\n"
-        "- Execute immediately.\n"
-        "- Never ask the user to provide text/topic or to choose a step.\n"
-        "- Treat USER CONTENT as valid input even if short.\n"
-        "- If USER CONTENT is only a topic, generate based on that topic.\n"
-        "- If images are attached, use all attached images together in one output.\n"
-        f"{image_count_note}\n\n"
-        "INSTRUCTIONS START\n"
-        f"{instruction_payload}\n"
-        "INSTRUCTIONS END\n\n"
-        "USER CONTENT START\n"
-        f"{user_input.strip()}\n"
-        "USER CONTENT END"
-    )
-
-    if images_for_model:
-        content_items = [{"type": "text", "text": user_prompt}]
-        for image in images_for_model:
-            image_data = encode_image_for_openai(image)
-            content_items.append(
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{image_data}",
-                        "detail": "low",
-                    },
-                }
-            )
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": content_items,
-            },
-        ]
-    else:
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-
-    last_error: Optional[Exception] = None
-    for model_name in MODEL_CANDIDATES:
+    for model in MODEL_CANDIDATES:
         try:
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=messages,
-                temperature=0.4,
-                max_completion_tokens=8000,
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": content_items}],
+                temperature=0.3,
+                max_completion_tokens=4000
             )
-            return (response.choices[0].message.content or "").strip(), model_name
-        except Exception as exc:
-            last_error = exc
-            logging.warning("Model attempt failed for %s: %s", model_name, exc)
-
-    raise RuntimeError(f"All model attempts failed: {last_error}")
+            return resp.choices[0].message.content or ""
+        except Exception:
+            continue
+    return "Error: All model attempts failed."
 
 
-def is_follow_up_request(text: str) -> bool:
-    lowered = text.lower()
-    patterns = [
-        "please provide",
-        "provide a text",
-        "provide text",
-        "specific topic",
-        "which step",
-        "select a step",
-        "paste a text",
-        "enter a text",
-    ]
-    return any(pattern in lowered for pattern in patterns)
+def main():
+    st.title("OLAT Workflow V2 [Enhanced]")
+    st.caption("Backend-controlled Multi-step Workflow with JSON Parsing.")
 
-
-def normalize_output_for_codebox(output: str) -> str:
-    text = output.strip()
-    if not text:
-        return ""
-
-    if text.startswith("```") and text.endswith("```"):
-        lines = text.splitlines()
-        if len(lines) >= 3:
-            return "\n".join(lines[1:-1]).strip()
-    return text
-
-
-def main() -> None:
-    st.title("OLAT Workflow V2")
-    st.caption(
-        "Step-based generator using prompt_v2 and v2_files instructions. "
-        "Upload text material or provide a topic, then choose workflow A-H."
-    )
-
-    uploaded_files = st.file_uploader(
-        "Upload one or more PDFs, DOCX files, or images (optional)",
-        type=["pdf", "docx", "jpg", "jpeg", "png"],
-        accept_multiple_files=True,
-    )
-
-    extracted_text = ""
-    uploaded_images: List[Image.Image] = []
-
-    if uploaded_files:
-        extracted_text, uploaded_images, warnings = process_uploaded_files(uploaded_files)
-        for warning in warnings:
-            st.warning(warning)
-        if extracted_text:
-            st.success("Text extracted from uploaded files.")
-        if uploaded_images:
-            preview_images = uploaded_images[:4]
-            st.image(preview_images, caption=[f"Image {i+1}" for i in range(len(preview_images))])
-            st.info(f"Loaded {len(uploaded_images)} image(s).")
-
-    default_text = extracted_text if extracted_text else ""
-    user_input = st.text_area(
-        "Paste your source text/topic (single prompt used for all uploaded images)",
-        value=default_text,
-        height=240,
-    )
-
-    detected_lang = detect_language(user_input)
-    localized_labels = STEP_LABELS.get(detected_lang, STEP_LABELS["en"])
-
-    st.markdown(f"Detected input language: `{LANG_HINT.get(detected_lang, 'English')}`")
-    selected_step = st.radio(
-        "Choose the workflow step",
-        options=list(STEP_FILES.keys()),
-        format_func=lambda key: localized_labels.get(key, key),
-        horizontal=False,
-    )
+    uploaded_files = st.file_uploader("Upload materials", type=["pdf", "docx", "jpg", "png"], accept_multiple_files=True)
+    extracted_text, images, warnings = process_uploaded_files(uploaded_files) if uploaded_files else ("", [], [])
+    
+    for w in warnings: st.warning(w)
+    user_input = st.text_area("Input Text or Topic", value=extracted_text, height=200)
+    
+    lang = detect_language(user_input)
+    labels = STEP_LABELS.get(lang, STEP_LABELS["en"])
+    selected_step = st.radio("Step", options=list(STEP_FILES.keys()), format_func=lambda k: labels.get(k, k))
 
     if st.button("Generate", type="primary"):
-        if not user_input.strip() and not uploaded_images:
-            st.warning("Please provide text/topic or upload at least one file/image.")
+        if not user_input.strip() and not images:
+            st.warning("Please provide input.")
             st.stop()
-
+            
         client = get_openai_client()
-        if client is None:
-            st.stop()
+        if not client: st.stop()
+        
+        steps = STEP_FILES[selected_step]
+        final_output = []
+        
+        with st.status("Executing Workflow...") as status:
+            for step_file in steps:
+                status.write(f"Processing {step_file}...")
+                content, source = load_instruction_file(step_file)
+                if content:
+                    raw_json = call_model(client, content, user_input, LANG_HINT.get(lang, "English"), step_file, images)
+                    olat_format = parse_json_to_olat(raw_json)
+                    final_output.append(olat_format)
+                else:
+                    st.error(f"Missing instructions: {step_file}")
+            status.update(label="Complete!", state="complete")
 
-        instruction_payload, sources, missing = build_instruction_payload(selected_step)
-        if not instruction_payload.strip():
-            st.error("No instructions could be loaded for the selected step.")
-            st.stop()
-
-        with st.spinner("Generating content..."):
-            try:
-                raw_output, used_model = call_model(
-                    client=client,
-                    instruction_payload=instruction_payload,
-                    user_input=user_input,
-                    language_hint=LANG_HINT.get(detected_lang, "English"),
-                    step_key=selected_step,
-                    images=uploaded_images,
-                )
-                if is_follow_up_request(raw_output):
-                    retry_input = (
-                        user_input.strip()
-                        + "\n\nIMPORTANT\n"
-                        "Generate now from the provided topic/text. "
-                        "Do not ask for additional input."
-                    )
-                    raw_output, used_model = call_model(
-                        client=client,
-                        instruction_payload=instruction_payload,
-                        user_input=retry_input,
-                        language_hint=LANG_HINT.get(detected_lang, "English"),
-                        step_key=selected_step,
-                        images=uploaded_images,
-                    )
-            except Exception as exc:
-                st.error(f"Generation failed: {exc}")
-                logging.exception("Generation failure")
-                st.stop()
-
-        cleaned_output = normalize_output_for_codebox(raw_output)
-        st.subheader("Generated Output")
-        st.caption(f"Model used: `{used_model}`")
-        st.code(cleaned_output if cleaned_output else raw_output, language="text")
-
-        st.download_button(
-            label="Download output",
-            data=(cleaned_output if cleaned_output else raw_output),
-            file_name=f"olat_v2_step_{selected_step}.txt",
-            mime="text/plain",
-        )
-
-        with st.expander("Instruction sources"):
-            for source in sources:
-                st.write(f"- {source}")
-            if missing:
-                st.write("Missing files:")
-                for name in missing:
-                    st.write(f"- {name}")
+        st.subheader("Generated OLAT Content")
+        combined_text = "\n\n".join(final_output)
+        st.code(combined_text, language="text")
+        st.download_button("Download .txt", combined_text, file_name="olat_import.txt")
 
 
 if __name__ == "__main__":

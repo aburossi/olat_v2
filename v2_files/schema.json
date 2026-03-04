@@ -1,0 +1,79 @@
+{
+  "questions": [
+    {
+      "type": "SC",
+      "title": "Question Title",
+      "question": "Question text?",
+      "points": 1,
+      "answers": [
+        {"text": "Correct Answer", "points": 1},
+        {"text": "Wrong Answer 1", "points": -0.5},
+        {"text": "Wrong Answer 2", "points": -0.5},
+        {"text": "Wrong Answer 3", "points": -0.5}
+      ]
+    },
+    {
+      "type": "MC",
+      "title": "Question Title",
+      "question": "Question text?",
+      "points": 3,
+      "max_answers": 4,
+      "min_answers": 0,
+      "answers": [
+        {"text": "Correct 1", "points": 1},
+        {"text": "Correct 2", "points": 1},
+        {"text": "Correct 3", "points": 1},
+        {"text": "Wrong 1", "points": -1}
+      ]
+    },
+    {
+      "type": "KPRIM",
+      "title": "Question Title",
+      "question": "Question text?",
+      "points": 5,
+      "answers": [
+        {"text": "Statement 1", "correct": true},
+        {"text": "Statement 2", "correct": false},
+        {"text": "Statement 3", "correct": false},
+        {"text": "Statement 4", "correct": true}
+      ]
+    },
+    {
+      "type": "Truefalse",
+      "title": "Title",
+      "question": "Question text?",
+      "points": 3,
+      "statements": [
+        {"text": "Statement A", "correct": true},
+        {"text": "Statement B", "correct": true},
+        {"text": "Statement C", "correct": false}
+      ]
+    },
+    {
+      "type": "FIB",
+      "title": "Title",
+      "points": 3,
+      "text": "Text with *blank*",
+      "answer": "correct content",
+      "length": 150
+    },
+    {
+      "type": "ESSAY",
+      "title": "Title",
+      "question": "Prompt",
+      "points": 1,
+      "min_chars": 200,
+      "max_chars": 2000
+    },
+    {
+      "type": "Inlinechoice",
+      "title": "Title",
+      "instructions": "Instructions",
+      "text_segments": [
+        {"text": "Segment before blank 1 "},
+        {"blank": "correct_word", "all_options": ["option1", "option2", "correct_word"]},
+        {"text": " segment after blank 1"}
+      ]
+    }
+  ]
+}
