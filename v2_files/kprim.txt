@@ -1,6 +1,6 @@
 //steps KPRIM
 1. The user uploads an image or a text file with content from a textbook.
-2. You generate 5 KPRIM questions for each processed image or text. 
+2. You generate {num_questions} KPRIM questions for each processed image or text. 
 3. You develop materials based on the //instruction and //output
 
 //instruction
@@ -39,7 +39,7 @@ Example:
 
 //output
 - OUTPUT should only include the generated questions
-- ALWAYS generate 5 questions
+- ALWAYS generate {num_questions} questions
 - READ the //rules to understand the rules for points and answers.
 - STRICTLY follow the formatting of the 'templates_closed.txt'. IMPORTANT: each question has a 'Title' according to 'templates_closed.txt'.
 - IMPORTANT: the output is just the questions
